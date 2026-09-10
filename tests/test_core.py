@@ -6,6 +6,7 @@ from zram_doctor.core import (
     LiveDevice,
     evaluate,
     get_merged_config_text,
+    parse_size_literal,
     parse_zram_generator_conf,
     run_swapon,
     run_zramctl,
@@ -148,3 +149,55 @@ def test_evaluate_flags_configured_swap_device_not_in_swapon():
     report = evaluate(configured, live, set())
     assert report.has_warnings
     assert any("swapon" in f.message for f in report.findings)
+
+
+def test_parse_size_literal_plain_mib_default():
+    assert parse_size_literal("4096") == 4096 * 1024 * 1024
+
+
+def test_parse_size_literal_gib_suffix():
+    assert parse_size_literal("8G") == 8 * 1024**3
+    assert parse_size_literal("8GiB") == 8 * 1024**3
+
+
+def test_parse_size_literal_kib_suffix():
+    assert parse_size_literal("512K") == 512 * 1024
+
+
+def test_parse_size_literal_returns_none_for_expression():
+    # ram/swap-relative expressions are intentionally not evaluated.
+    assert parse_size_literal("min(ram / 2, 4096)") is None
+    assert parse_size_literal("ram / 4") is None
+
+
+def test_parse_size_literal_returns_none_for_empty():
+    assert parse_size_literal("") is None
+    assert parse_size_literal(None) is None
+
+
+def test_evaluate_flags_size_drift_for_plain_literal():
+    configured = [ConfiguredDevice(name="zram0", zram_size_expr="8G")]
+    live = [LiveDevice(name="zram0", algorithm="zstd", disksize_bytes=4 * 1024**3)]
+    report = evaluate(configured, live, {"zram0"})
+    assert report.has_warnings
+    assert any("zram-size" in f.message and "8G" in f.message for f in report.findings)
+
+
+def test_evaluate_no_size_drift_when_literal_matches():
+    configured = [ConfiguredDevice(name="zram0", zram_size_expr="4096")]
+    live = [LiveDevice(name="zram0", algorithm="zstd", disksize_bytes=4096 * 1024 * 1024)]
+    report = evaluate(configured, live, {"zram0"})
+    assert not report.has_warnings
+    assert not report.has_failures
+
+
+def test_evaluate_reports_info_for_unverifiable_size_expression():
+    configured = [ConfiguredDevice(name="zram0", zram_size_expr="min(ram / 2, 4096)")]
+    live = [LiveDevice(name="zram0", algorithm="zstd", disksize_bytes=4 * 1024**3)]
+    report = evaluate(configured, live, {"zram0"})
+    assert not report.has_warnings
+    assert not report.has_failures
+    assert any(
+        "ram/swap-relative expression" in f.message and f.level == "info"
+        for f in report.findings
+    )

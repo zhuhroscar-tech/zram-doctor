@@ -228,6 +228,46 @@ def _human_bytes(n: Optional[int]) -> str:
     return f"{value:.1f}PiB"
 
 
+# zram-generator's zram-size grammar allows plain numeric literals (with an
+# optional K/M/G/T suffix, MiB-based binary units, default unit is MiB when
+# none given) *or* arithmetic expressions referencing "ram"/"swap" totals
+# and min()/max() -- see `man zram-generator.conf`. We can only safely
+# verify the plain-literal case without re-implementing that whole
+# expression grammar and re-deriving the host's RAM/swap totals the same
+# way the generator does; for anything else we report the drift check as
+# genuinely unknown rather than silently skipping it or guessing.
+_SIZE_LITERAL_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([KMGT]i?B?|[kmgt])?$")
+_SIZE_UNIT_MULTIPLIERS = {
+    "": 1024 * 1024,  # zram-generator's default unit is MiB
+    "K": 1024,
+    "KIB": 1024,
+    "M": 1024 * 1024,
+    "MIB": 1024 * 1024,
+    "G": 1024 * 1024 * 1024,
+    "GIB": 1024 * 1024 * 1024,
+    "T": 1024 * 1024 * 1024 * 1024,
+    "TIB": 1024 * 1024 * 1024 * 1024,
+}
+
+
+def parse_size_literal(expr: str) -> Optional[int]:
+    """Parse a plain numeric zram-size literal (e.g. "4096", "8G", "512MiB")
+    into bytes. Returns None for anything that isn't a plain literal --
+    including ram/swap-relative expressions like "min(ram / 2, 4096)",
+    which this intentionally does NOT attempt to evaluate (see module note
+    above): callers must treat None as "cannot verify", not "zero"."""
+    if not expr:
+        return None
+    m = _SIZE_LITERAL_RE.match(expr.strip())
+    if not m:
+        return None
+    number, unit = m.group(1), (m.group(2) or "").upper()
+    multiplier = _SIZE_UNIT_MULTIPLIERS.get(unit)
+    if multiplier is None:
+        return None
+    return int(float(number) * multiplier)
+
+
 def evaluate(configured: list, live: list, swap_names: set) -> Report:
     findings = []
     live_by_name = {d.name: d for d in live}
@@ -255,6 +295,32 @@ def evaluate(configured: list, live: list, swap_names: set) -> Report:
                         f"'{live_dev.algorithm}'. The device was likely created before this "
                         f"config change; restart systemd-zram-setup@{cfg.name}.service to "
                         f"apply it (this recreates the device and briefly drops its swapped data).",
+                    )
+                )
+
+        if cfg.zram_size_expr and live_dev.disksize_bytes is not None:
+            configured_bytes = parse_size_literal(cfg.zram_size_expr)
+            if configured_bytes is None:
+                findings.append(
+                    Finding(
+                        "info",
+                        f"{cfg.name}: zram-size='{cfg.zram_size_expr}' is a ram/swap-relative "
+                        f"expression (not a plain literal), so its target size cannot be "
+                        f"verified against the live device (currently "
+                        f"{_human_bytes(live_dev.disksize_bytes)}) without re-implementing "
+                        f"zram-generator's size grammar -- compare manually if unsure.",
+                    )
+                )
+            elif configured_bytes != live_dev.disksize_bytes:
+                findings.append(
+                    Finding(
+                        "warn",
+                        f"{cfg.name}: config requests zram-size={cfg.zram_size_expr} "
+                        f"({_human_bytes(configured_bytes)}) but the running device is "
+                        f"{_human_bytes(live_dev.disksize_bytes)}. The device was likely "
+                        f"created before this config change; restart "
+                        f"systemd-zram-setup@{cfg.name}.service to apply it (this recreates "
+                        f"the device and briefly drops its swapped data).",
                     )
                 )
 
