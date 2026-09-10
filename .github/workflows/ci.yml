@@ -33,8 +33,22 @@ jobs:
         run: |
           zram-doctor --version
           zram-doctor --help
-          zram-doctor --json | python -m json.tool > /dev/null
-          zram-doctor; echo "exit code: $?"
+          zram-doctor --json > /tmp/zd.json || true
+          python -m json.tool < /tmp/zd.json > /dev/null
+          # zram-doctor's own exit code (0/1/2) reflects diagnostic findings,
+          # not a smoke-test failure -- GH Actions runners may lack zram
+          # kernel module support, which is a legitimate "device missing"
+          # finding, not a bug. Only fail this step if the command itself
+          # cannot run (exit code >2 would indicate a crash).
+          set +e
+          zram-doctor
+          rc=$?
+          set -e
+          echo "zram-doctor exit code: $rc"
+          if [ "$rc" -gt 2 ]; then
+            echo "Unexpected exit code $rc (expected 0/1/2)"
+            exit 1
+          fi
 
   build-artifact:
     name: build wheel + sdist + pyz
@@ -56,7 +70,8 @@ jobs:
       - name: Smoke-test the .pyz on this Linux runner
         run: |
           python3 dist/zram-doctor.pyz --version
-          python3 dist/zram-doctor.pyz --json | python3 -m json.tool > /dev/null
+          python3 dist/zram-doctor.pyz --json > /tmp/zd.json || true
+          python3 -m json.tool < /tmp/zd.json > /dev/null
       - name: Compute checksums
         run: |
           cd dist
