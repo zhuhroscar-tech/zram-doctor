@@ -8,24 +8,24 @@ from dataclasses import asdict
 
 from . import __version__
 from .core import collect_and_evaluate
+from .style import resolve_style, status_headline
 
 
-LEVEL_LABEL = {"fail": "FAIL", "warn": "WARN", "info": "info"}
-
-
-def _print_human(report) -> None:
-    print(f"Configured zram devices: {', '.join(c.name for c in report.configured) or 'none'}")
-    print(f"Live zram devices:       {', '.join(d.name for d in report.live) or 'none'}")
+def _print_human(report, style) -> None:
+    configured = ', '.join(c.name for c in report.configured) or style.dim('none')
+    live = ', '.join(d.name for d in report.live) or style.dim('none')
+    print(f"Configured zram devices: {configured}")
+    print(f"Live zram devices:       {live}")
     print()
     for f in report.findings:
-        print(f"[{LEVEL_LABEL.get(f.level, f.level.upper())}] {f.message}")
+        print(status_headline(style, f.level, f.message))
     print()
     if report.has_failures:
-        print("Result: drift detected -- a configured device failed to come up.")
+        print(status_headline(style, "fail", "Drift detected -- a configured device failed to come up."))
     elif report.has_warnings:
-        print("Result: drift detected -- config and running state disagree (see WARN above).")
+        print(status_headline(style, "warn", "Drift detected -- config and running state disagree."))
     else:
-        print("Result: no drift detected.")
+        print(status_headline(style, "ok", "No drift detected."))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p.add_argument("--no-color", action="store_true", help="Disable colored output.")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return p
 
@@ -56,7 +57,8 @@ def main(argv: list | None = None) -> int:
         }
         print(json.dumps(out, indent=2))
     else:
-        _print_human(report)
+        style = resolve_style(no_color_flag=args.no_color)
+        _print_human(report, style)
 
     if report.has_failures:
         return 2

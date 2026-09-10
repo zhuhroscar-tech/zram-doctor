@@ -25,6 +25,9 @@ Homepage = "https://github.com/zhuhroscar-tech/zram-doctor"
 [project.scripts]
 zram-doctor = "zram_doctor.cli:main"
 
+[project.optional-dependencies]
+dev = ["pytest"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
