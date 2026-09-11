@@ -1,8 +1,19 @@
 # zram-doctor
 
+[![CI](https://github.com/zhuhroscar-tech/zram-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/zhuhroscar-tech/zram-doctor/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/zhuhroscar-tech/zram-doctor?include_prereleases&label=release)](https://github.com/zhuhroscar-tech/zram-doctor/releases)
+![Linux](https://img.shields.io/badge/platform-Linux-111111?logo=linux)
+
 Detects drift between `zram-generator.conf` and the actually-running zram
 device(s) on Linux — the gap behind "I changed my config, systemd said it
 worked, but the device is still using the old settings."
+
+## Simple explanation
+
+Checks whether your compressed-RAM swap (zram) settings actually match what
+is running right now. It catches the common trap where you edit the zram
+config, everything reports success, but the live device silently keeps
+using the old settings until you explicitly restart it.
 
 ## The problem
 
