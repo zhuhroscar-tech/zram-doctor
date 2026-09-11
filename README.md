@@ -42,18 +42,7 @@ you have to manually cross-reference `zram-generator.conf`, `zramctl`, and
 
 ## What this does
 
-```
-$ zram-doctor
-Configured zram devices: zram0
-Live zram devices:       zram0
-
-[WARN] zram0: config requests compression-algorithm='zstd' but the running
-       device is using 'lzo-rle'. The device was likely created before this
-       config change; restart systemd-zram-setup@zram0.service to apply it
-       (this recreates the device and briefly drops its swapped data).
-
-Result: drift detected -- config and running state disagree (see WARN above).
-```
+![zram-doctor example output](docs/images/example-output.png)
 
 It reads the merged `zram-generator.conf` (via `systemd-analyze cat-config`,
 which correctly implements systemd's drop-in override precedence — with a
