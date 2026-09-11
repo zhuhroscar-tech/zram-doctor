@@ -4,6 +4,8 @@ import subprocess
 from zram_doctor.core import (
     ConfiguredDevice,
     LiveDevice,
+    _human_bytes,
+    collect_and_evaluate,
     evaluate,
     get_merged_config_text,
     parse_size_literal,
@@ -201,3 +203,243 @@ def test_evaluate_reports_info_for_unverifiable_size_expression():
         "ram/swap-relative expression" in f.message and f.level == "info"
         for f in report.findings
     )
+
+
+def test_evaluate_flags_mount_point_drift():
+    configured = [ConfiguredDevice(name="zram0", mount_point="/var/compressed")]
+    live = [LiveDevice(name="zram0", algorithm="zstd", disksize_bytes=1024**3, mountpoint="/tmp/other")]
+    report = evaluate(configured, live, {"zram0"})
+    assert report.has_warnings
+    assert any("mount-point" in f.message for f in report.findings)
+
+
+def test_evaluate_no_mount_point_drift_when_matching():
+    configured = [ConfiguredDevice(name="zram0", mount_point="/var/compressed")]
+    live = [LiveDevice(name="zram0", algorithm="zstd", disksize_bytes=1024**3, mountpoint="/var/compressed")]
+    report = evaluate(configured, live, {"zram0"})
+    assert not report.has_warnings
+
+
+# --- get_merged_config_text: OSError/exception paths ---
+
+
+def test_get_merged_config_text_systemd_analyze_oserror_falls_back(tmp_path, monkeypatch):
+    def raising_runner(cmd, **kwargs):
+        raise OSError("no such binary")
+
+    monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: "/usr/bin/systemd-analyze")
+    fake_path = tmp_path / "zram-generator.conf"
+    fake_path.write_text("[zram0]\ncompression-algorithm=lz4\n")
+    monkeypatch.setattr("zram_doctor.core.CONFIG_SEARCH_PATHS", [fake_path])
+    text = get_merged_config_text(runner=raising_runner)
+    assert text is not None
+    assert "lz4" in text
+
+
+def test_get_merged_config_text_systemd_analyze_subprocess_error_falls_back(tmp_path, monkeypatch):
+    def raising_runner(cmd, **kwargs):
+        raise subprocess.SubprocessError("boom")
+
+    monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: "/usr/bin/systemd-analyze")
+    fake_path = tmp_path / "zram-generator.conf"
+    fake_path.write_text("[zram0]\ncompression-algorithm=zstd\n")
+    monkeypatch.setattr("zram_doctor.core.CONFIG_SEARCH_PATHS", [fake_path])
+    text = get_merged_config_text(runner=raising_runner)
+    assert text is not None
+    assert "zstd" in text
+
+
+def test_get_merged_config_text_skips_unreadable_file_and_tries_next(tmp_path, monkeypatch):
+    monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: None)
+    unreadable = tmp_path / "unreadable.conf"
+    unreadable.write_text("[zram0]\ncompression-algorithm=lz4\n")
+    unreadable.chmod(0o000)
+    readable = tmp_path / "readable.conf"
+    readable.write_text("[zram0]\ncompression-algorithm=zstd\n")
+    monkeypatch.setattr("zram_doctor.core.CONFIG_SEARCH_PATHS", [unreadable, readable])
+    try:
+        text = get_merged_config_text()
+    finally:
+        unreadable.chmod(0o644)
+    assert text is not None
+    assert "zstd" in text
+
+
+def test_parse_zram_generator_conf_ignores_kv_before_any_section():
+    # A key=value line before any [zramN] header has no "current" device to
+    # attach to and must be skipped, not raise.
+    text = "compression-algorithm=zstd\n[zram0]\ncompression-algorithm=lz4\n"
+    devices = parse_zram_generator_conf(text)
+    assert len(devices) == 1
+    assert devices[0].compression_algorithm == "lz4"
+
+
+def test_parse_zram_generator_conf_ignores_malformed_kv_line():
+    text = "[zram0]\nthis is not a key value line\ncompression-algorithm=zstd\n"
+    devices = parse_zram_generator_conf(text)
+    assert len(devices) == 1
+    assert devices[0].compression_algorithm == "zstd"
+
+
+# --- run_zramctl: exception/error paths ---
+
+
+def test_run_zramctl_oserror_returns_empty(monkeypatch):
+    monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: "/usr/bin/zramctl")
+
+    def raising_runner(cmd, **kwargs):
+        raise OSError("boom")
+
+    assert run_zramctl(runner=raising_runner) == []
+
+
+def test_run_zramctl_subprocess_error_returns_empty(monkeypatch):
+    monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: "/usr/bin/zramctl")
+
+    def raising_runner(cmd, **kwargs):
+        raise subprocess.SubprocessError("boom")
+
+    assert run_zramctl(runner=raising_runner) == []
+
+
+def test_run_zramctl_nonzero_returncode_returns_empty(monkeypatch):
+    monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: "/usr/bin/zramctl")
+
+    def fake_runner(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="permission denied")
+
+    assert run_zramctl(runner=fake_runner) == []
+
+
+def test_run_zramctl_invalid_json_returns_empty(monkeypatch):
+    monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: "/usr/bin/zramctl")
+
+    def fake_runner(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout="{not json", stderr="")
+
+    assert run_zramctl(runner=fake_runner) == []
+
+
+def test_run_zramctl_bad_disksize_becomes_none(monkeypatch):
+    monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: "/usr/bin/zramctl")
+    payload = json.dumps(
+        {"zramdevices": [{"name": "/dev/zram0", "disksize": "not-a-number", "algorithm": "zstd"}]}
+    )
+
+    def fake_runner(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout=payload, stderr="")
+
+    devices = run_zramctl(runner=fake_runner)
+    assert len(devices) == 1
+    assert devices[0].disksize_bytes is None
+
+
+def test_run_zramctl_falls_back_to_blockdevices_key(monkeypatch):
+    monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: "/usr/bin/zramctl")
+    payload = json.dumps(
+        {"blockdevices": [{"name": "zram1", "disksize": "1024", "algorithm": "lz4"}]}
+    )
+
+    def fake_runner(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout=payload, stderr="")
+
+    devices = run_zramctl(runner=fake_runner)
+    assert len(devices) == 1
+    assert devices[0].name == "zram1"
+
+
+# --- run_swapon: missing binary / exception / error paths ---
+
+
+def test_run_swapon_missing_binary_returns_empty(monkeypatch):
+    monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: None)
+    assert run_swapon() == set()
+
+
+def test_run_swapon_oserror_returns_empty(monkeypatch):
+    monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: "/usr/sbin/swapon")
+
+    def raising_runner(cmd, **kwargs):
+        raise OSError("boom")
+
+    assert run_swapon(runner=raising_runner) == set()
+
+
+def test_run_swapon_subprocess_error_returns_empty(monkeypatch):
+    monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: "/usr/sbin/swapon")
+
+    def raising_runner(cmd, **kwargs):
+        raise subprocess.SubprocessError("boom")
+
+    assert run_swapon(runner=raising_runner) == set()
+
+
+def test_run_swapon_nonzero_returncode_returns_empty(monkeypatch):
+    monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: "/usr/sbin/swapon")
+
+    def fake_runner(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="denied")
+
+    assert run_swapon(runner=fake_runner) == set()
+
+
+# --- _human_bytes ---
+
+
+def test_human_bytes_none_is_unknown():
+    assert _human_bytes(None) == "unknown"
+
+
+def test_human_bytes_petabyte_scale():
+    huge = 2 * 1024**5  # 2 PiB
+    assert _human_bytes(huge) == "2.0PiB"
+
+
+def test_human_bytes_plain_bytes_no_decimal():
+    assert _human_bytes(512) == "512B"
+
+
+# --- parse_size_literal: unrecognized unit ---
+
+
+def test_parse_size_literal_returns_none_for_unrecognized_text():
+    assert parse_size_literal("not a size at all!!") is None
+
+
+# --- collect_and_evaluate: end-to-end wiring ---
+
+
+def test_collect_and_evaluate_end_to_end(monkeypatch):
+    def fake_runner(cmd, **kwargs):
+        if cmd[0] == "/usr/bin/systemd-analyze":
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="[zram0]\ncompression-algorithm=zstd\n", stderr=""
+            )
+        if cmd[0] == "/usr/bin/zramctl":
+            return subprocess.CompletedProcess(cmd, 0, stdout=SAMPLE_ZRAMCTL_JSON, stderr="")
+        if cmd[0] == "/usr/sbin/swapon":
+            return subprocess.CompletedProcess(cmd, 0, stdout="/dev/zram0\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+
+    def fake_which(name):
+        return {
+            "systemd-analyze": "/usr/bin/systemd-analyze",
+            "zramctl": "/usr/bin/zramctl",
+            "swapon": "/usr/sbin/swapon",
+        }.get(name)
+
+    monkeypatch.setattr("zram_doctor.core.shutil.which", fake_which)
+    report = collect_and_evaluate(runner=fake_runner)
+    assert report.configured[0].name == "zram0"
+    assert report.live[0].name == "zram0"
+    # config says zstd, live sample uses lzo-rle -> drift warning expected
+    assert report.has_warnings
+
+
+def test_collect_and_evaluate_no_config_no_devices(monkeypatch):
+    monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: None)
+    monkeypatch.setattr("zram_doctor.core.CONFIG_SEARCH_PATHS", [])
+    report = collect_and_evaluate(runner=subprocess.run)
+    assert not report.has_failures
+    assert not report.has_warnings
+    assert any("no zram configuration" in f.message.lower() for f in report.findings)
