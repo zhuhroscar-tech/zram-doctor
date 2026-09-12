@@ -158,6 +158,25 @@ def test_evaluate_no_zram_and_zramctl_present_is_still_a_clean_info_result():
     assert any("no zram configuration" in f.message.lower() for f in report.findings)
 
 
+def test_evaluate_configured_device_with_zramctl_missing_is_unknown_not_fail():
+    """Before this fix: if zramctl is missing (zramctl_missing=True) but the
+    host DOES have a [zramN] section in zram-generator.conf, evaluate()
+    still iterated configured devices, found no matching live device (since
+    live is necessarily [] when zramctl_missing), and emitted a hard "fail"
+    claiming the device was never created / the systemd unit may have
+    failed -- even though the real reason is simply that we never checked
+    because zramctl isn't installed. That turns an "unknown" state into a
+    false, actionable-looking failure. It should instead report the
+    per-device state as unverifiable (no fail), and the overall tool_error
+    warning still applies."""
+    configured = [ConfiguredDevice(name="zram0", zram_size_expr="4096", compression_algorithm="zstd")]
+    report = evaluate(configured, [], set(), zramctl_missing=True)
+    assert report.tool_error is True
+    assert not report.has_failures
+    assert not any("no live" in f.message.lower() and "device exists" in f.message.lower() for f in report.findings)
+    assert any("zramctl" in f.message.lower() for f in report.findings)
+
+
 def test_collect_and_evaluate_propagates_zramctl_missing(monkeypatch):
     monkeypatch.setattr("zram_doctor.core.get_merged_config_text", lambda runner=None: None)
     monkeypatch.setattr("zram_doctor.core.run_zramctl", lambda runner=None: ([], True))

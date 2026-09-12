@@ -279,14 +279,28 @@ def evaluate(configured: list, live: list, swap_names: set, zramctl_missing: boo
     for cfg in configured:
         live_dev = live_by_name.get(cfg.name)
         if live_dev is None:
-            findings.append(
-                Finding(
-                    "fail",
-                    f"{cfg.name} is configured in zram-generator.conf but no live "
-                    f"/dev/{cfg.name} device exists. The generator/unit may not have "
-                    f"run yet, or failed -- check `systemctl status systemd-zram-setup@{cfg.name}`.",
+            if zramctl_missing:
+                # We never actually queried live device state (zramctl is
+                # missing), so we genuinely don't know whether this device
+                # exists -- reporting "fail" here would misrepresent an
+                # unknown state as a verified problem. Defer to the
+                # tool_error warning emitted below instead.
+                findings.append(
+                    Finding(
+                        "info",
+                        f"{cfg.name} is configured in zram-generator.conf, but its live "
+                        f"state could not be checked because zramctl is not available.",
+                    )
                 )
-            )
+            else:
+                findings.append(
+                    Finding(
+                        "fail",
+                        f"{cfg.name} is configured in zram-generator.conf but no live "
+                        f"/dev/{cfg.name} device exists. The generator/unit may not have "
+                        f"run yet, or failed -- check `systemctl status systemd-zram-setup@{cfg.name}`.",
+                    )
+                )
             continue
 
         if cfg.compression_algorithm and live_dev.algorithm:
