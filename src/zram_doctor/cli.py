@@ -22,6 +22,8 @@ def _print_human(report, style) -> None:
     print()
     if report.has_failures:
         print(status_headline(style, "fail", "Drift detected -- a configured device failed to come up."))
+    elif report.tool_error:
+        print(status_headline(style, "warn", "Result may be incomplete -- see warning above."))
     elif report.has_warnings:
         print(status_headline(style, "warn", "Drift detected -- config and running state disagree."))
     else:
@@ -54,6 +56,7 @@ def main(argv: list | None = None) -> int:
             "findings": [asdict(f) for f in report.findings],
             "has_failures": report.has_failures,
             "has_warnings": report.has_warnings,
+            "tool_error": report.tool_error,
         }
         print(json.dumps(out, indent=2))
     else:

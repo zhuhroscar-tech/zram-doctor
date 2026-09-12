@@ -86,16 +86,19 @@ def test_run_zramctl_parses_json(monkeypatch):
     def fake_runner(cmd, **kwargs):
         return subprocess.CompletedProcess(cmd, 0, stdout=SAMPLE_ZRAMCTL_JSON, stderr="")
 
-    devices = run_zramctl(runner=fake_runner)
+    devices, missing = run_zramctl(runner=fake_runner)
     assert len(devices) == 1
     assert devices[0].name == "zram0"
     assert devices[0].disksize_bytes == 4294967296
     assert devices[0].algorithm == "lzo-rle"
+    assert missing is False
 
 
 def test_run_zramctl_missing_binary_returns_empty(monkeypatch):
     monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: None)
-    assert run_zramctl() == []
+    devices, missing = run_zramctl()
+    assert devices == []
+    assert missing is True
 
 
 def test_run_swapon_parses_names(monkeypatch):
@@ -128,7 +131,40 @@ def test_evaluate_no_drift_when_matching():
     report = evaluate(configured, live, {"zram0"})
     assert not report.has_failures
     assert not report.has_warnings
-    assert any("no drift" in f.message.lower() for f in report.findings)
+
+
+# --- regression: zramctl missing must not report a false "no drift" all-clear ---
+
+
+def test_evaluate_zramctl_missing_does_not_claim_no_drift():
+    """Before this fix, evaluate([], [], set()) with no config and no live
+    devices always emitted a plain "no zram configuration or active zram
+    devices found" info finding -- identical output whether the host
+    genuinely has no zram, or zramctl is simply not installed and we never
+    actually checked. That silently misreported an unknown state as a
+    verified all-clear."""
+    report = evaluate([], [], set(), zramctl_missing=True)
+    assert report.tool_error is True
+    assert report.has_warnings
+    assert not any("no zram configuration" in f.message.lower() for f in report.findings)
+    assert any("may be incomplete" in f.message.lower() for f in report.findings)
+
+
+def test_evaluate_no_zram_and_zramctl_present_is_still_a_clean_info_result():
+    report = evaluate([], [], set(), zramctl_missing=False)
+    assert report.tool_error is False
+    assert not report.has_warnings
+    assert not report.has_failures
+    assert any("no zram configuration" in f.message.lower() for f in report.findings)
+
+
+def test_collect_and_evaluate_propagates_zramctl_missing(monkeypatch):
+    monkeypatch.setattr("zram_doctor.core.get_merged_config_text", lambda runner=None: None)
+    monkeypatch.setattr("zram_doctor.core.run_zramctl", lambda runner=None: ([], True))
+    monkeypatch.setattr("zram_doctor.core.run_swapon", lambda runner=None: set())
+    report = collect_and_evaluate()
+    assert report.tool_error is True
+    assert report.has_warnings
 
 
 def test_evaluate_no_config_no_devices_is_informational():
@@ -290,7 +326,9 @@ def test_run_zramctl_oserror_returns_empty(monkeypatch):
     def raising_runner(cmd, **kwargs):
         raise OSError("boom")
 
-    assert run_zramctl(runner=raising_runner) == []
+    devices, missing = run_zramctl(runner=raising_runner)
+    assert devices == []
+    assert missing is True
 
 
 def test_run_zramctl_subprocess_error_returns_empty(monkeypatch):
@@ -299,7 +337,9 @@ def test_run_zramctl_subprocess_error_returns_empty(monkeypatch):
     def raising_runner(cmd, **kwargs):
         raise subprocess.SubprocessError("boom")
 
-    assert run_zramctl(runner=raising_runner) == []
+    devices, missing = run_zramctl(runner=raising_runner)
+    assert devices == []
+    assert missing is True
 
 
 def test_run_zramctl_nonzero_returncode_returns_empty(monkeypatch):
@@ -308,7 +348,9 @@ def test_run_zramctl_nonzero_returncode_returns_empty(monkeypatch):
     def fake_runner(cmd, **kwargs):
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="permission denied")
 
-    assert run_zramctl(runner=fake_runner) == []
+    devices, missing = run_zramctl(runner=fake_runner)
+    assert devices == []
+    assert missing is False
 
 
 def test_run_zramctl_invalid_json_returns_empty(monkeypatch):
@@ -317,7 +359,9 @@ def test_run_zramctl_invalid_json_returns_empty(monkeypatch):
     def fake_runner(cmd, **kwargs):
         return subprocess.CompletedProcess(cmd, 0, stdout="{not json", stderr="")
 
-    assert run_zramctl(runner=fake_runner) == []
+    devices, missing = run_zramctl(runner=fake_runner)
+    assert devices == []
+    assert missing is False
 
 
 def test_run_zramctl_bad_disksize_becomes_none(monkeypatch):
@@ -329,7 +373,7 @@ def test_run_zramctl_bad_disksize_becomes_none(monkeypatch):
     def fake_runner(cmd, **kwargs):
         return subprocess.CompletedProcess(cmd, 0, stdout=payload, stderr="")
 
-    devices = run_zramctl(runner=fake_runner)
+    devices, missing = run_zramctl(runner=fake_runner)
     assert len(devices) == 1
     assert devices[0].disksize_bytes is None
 
@@ -343,7 +387,7 @@ def test_run_zramctl_falls_back_to_blockdevices_key(monkeypatch):
     def fake_runner(cmd, **kwargs):
         return subprocess.CompletedProcess(cmd, 0, stdout=payload, stderr="")
 
-    devices = run_zramctl(runner=fake_runner)
+    devices, missing = run_zramctl(runner=fake_runner)
     assert len(devices) == 1
     assert devices[0].name == "zram1"
 
@@ -437,9 +481,13 @@ def test_collect_and_evaluate_end_to_end(monkeypatch):
 
 
 def test_collect_and_evaluate_no_config_no_devices(monkeypatch):
+    """With no config search paths and no binaries available at all (including
+    zramctl), the correct answer is 'we could not check' (tool_error/warn),
+    not a false all-clear -- this was the exact bug this fix closes."""
     monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: None)
     monkeypatch.setattr("zram_doctor.core.CONFIG_SEARCH_PATHS", [])
     report = collect_and_evaluate(runner=subprocess.run)
     assert not report.has_failures
-    assert not report.has_warnings
-    assert any("no zram configuration" in f.message.lower() for f in report.findings)
+    assert report.has_warnings
+    assert report.tool_error is True
+    assert any("may be incomplete" in f.message.lower() for f in report.findings)

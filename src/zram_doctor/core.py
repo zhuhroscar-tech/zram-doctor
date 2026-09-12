@@ -75,6 +75,7 @@ class Report:
     configured: list
     live: list
     findings: list = field(default_factory=list)
+    tool_error: bool = False
 
     @property
     def has_failures(self) -> bool:
@@ -152,10 +153,13 @@ def parse_zram_generator_conf(text: str) -> list:
     return list(devices.values())
 
 
-def run_zramctl(runner=subprocess.run) -> list:
+def run_zramctl(runner=subprocess.run) -> tuple:
+    """Returns (devices, zramctl_missing) -- zramctl_missing distinguishes
+    "the binary isn't installed, so we genuinely don't know" from "it ran
+    and found zero devices", which matter differently to callers."""
     zramctl_bin = shutil.which("zramctl")
     if not zramctl_bin:
-        return []
+        return [], True
     try:
         proc = runner(
             [zramctl_bin, "--output-all", "--bytes", "--json"],
@@ -165,13 +169,13 @@ def run_zramctl(runner=subprocess.run) -> list:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return []
+        return [], True
     if proc.returncode != 0 or not proc.stdout:
-        return []
+        return [], False
     try:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError:
-        return []
+        return [], False
     rows = data.get("zramdevices") or data.get("blockdevices") or []
     devices = []
     for row in rows:
@@ -190,7 +194,7 @@ def run_zramctl(runner=subprocess.run) -> list:
                 mountpoint=row.get("mountpoint") or None,
             )
         )
-    return devices
+    return devices, False
 
 
 def run_swapon(runner=subprocess.run) -> set:
@@ -268,7 +272,7 @@ def parse_size_literal(expr: str) -> Optional[int]:
     return int(float(number) * multiplier)
 
 
-def evaluate(configured: list, live: list, swap_names: set) -> Report:
+def evaluate(configured: list, live: list, swap_names: set, zramctl_missing: bool = False) -> Report:
     findings = []
     live_by_name = {d.name: d for d in live}
 
@@ -358,18 +362,28 @@ def evaluate(configured: list, live: list, swap_names: set) -> Report:
             )
 
     if not configured and not live:
-        findings.append(Finding("info", "No zram configuration or active zram devices found."))
+        if zramctl_missing:
+            findings.append(
+                Finding(
+                    "warn",
+                    "zramctl is not available, so live zram device state could not be "
+                    "checked. This result may be incomplete -- install util-linux's "
+                    "zramctl and re-run rather than treating this as 'no zram in use'.",
+                )
+            )
+        else:
+            findings.append(Finding("info", "No zram configuration or active zram devices found."))
     elif not findings:
         findings.append(
             Finding("info", "Configured and running zram devices agree -- no drift detected.")
         )
 
-    return Report(configured=configured, live=live, findings=findings)
+    return Report(configured=configured, live=live, findings=findings, tool_error=zramctl_missing)
 
 
 def collect_and_evaluate(runner=subprocess.run) -> Report:
     config_text = get_merged_config_text(runner=runner)
     configured = parse_zram_generator_conf(config_text) if config_text else []
-    live = run_zramctl(runner=runner)
+    live, zramctl_missing = run_zramctl(runner=runner)
     swap_names = run_swapon(runner=runner)
-    return evaluate(configured, live, swap_names)
+    return evaluate(configured, live, swap_names, zramctl_missing=zramctl_missing)
