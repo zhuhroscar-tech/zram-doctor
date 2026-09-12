@@ -3,7 +3,9 @@ import subprocess
 from zram_doctor.style import (
     Style,
     bool_badge,
+    print_fields,
     resolve_style,
+    section,
     status_headline,
 )
 
@@ -97,3 +99,43 @@ def test_status_headline_supports_info_level():
     assert status_headline(s, "info", "Neutral note") == "[i] Neutral note"
     s2 = Style(True)
     assert "\033[2m" in status_headline(s2, "info", "Neutral note")
+
+
+def test_style_enabled_wraps_yellow_cyan_bold_yellow():
+    s = Style(True)
+    assert s.yellow("x") == "\033[33mx\033[0m"
+    assert s.cyan("x") == "\033[36mx\033[0m"
+    assert s.bold_yellow("x") == "\033[1;33mx\033[0m"
+
+
+def test_style_disabled_yellow_cyan_bold_yellow_are_identity():
+    s = Style(False)
+    assert s.yellow("x") == "x"
+    assert s.cyan("x") == "x"
+    assert s.bold_yellow("x") == "x"
+
+
+def test_print_fields_empty_rows_prints_nothing(capsys):
+    print_fields([])
+    assert capsys.readouterr().out == ""
+
+
+def test_print_fields_aligns_columns(capsys):
+    print_fields([("short", "1"), ("a longer label", "2")])
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].startswith("  short")
+    assert out[1].startswith("  a longer label")
+    # Values start at the same column for both rows.
+    assert out[0].index("1") == out[1].index("2")
+
+
+def test_print_fields_custom_indent(capsys):
+    print_fields([("k", "v")], indent="    ")
+    out = capsys.readouterr().out
+    assert out.startswith("    k")
+
+
+def test_section_prints_blank_line_then_title(capsys):
+    section("Diagnostics")
+    out = capsys.readouterr().out
+    assert out == "\nDiagnostics\n"
