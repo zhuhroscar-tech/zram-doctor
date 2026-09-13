@@ -66,12 +66,23 @@ jobs:
       - name: Build standalone .pyz (zipapp)
         run: |
           python -m pip install --target build/pyz-deps .
-          python -m zipapp build/pyz-deps -m "zram_doctor.cli:main" -o dist/zram-doctor.pyz -p "/usr/bin/env python3"
+          printf 'from zram_doctor.cli import main\nif __name__ == "__main__":\n    raise SystemExit(main())\n' > build/pyz-deps/__main__.py
+          python -m zipapp build/pyz-deps -o dist/zram-doctor.pyz -p "/usr/bin/env python3"
       - name: Smoke-test the .pyz on this Linux runner
         run: |
           python3 dist/zram-doctor.pyz --version
           python3 dist/zram-doctor.pyz --json > /tmp/zd.json || true
           python3 -m json.tool < /tmp/zd.json > /dev/null
+          # Regression check: the .pyz's exit code must reflect the real
+          # command result, not always be 0 (zipapp's --main template
+          # omits sys.exit(), which previously made every .pyz invocation
+          # report success regardless of actual findings/errors). An
+          # unrecognized flag is a deterministic nonzero (argparse error) case.
+          set +e
+          python3 dist/zram-doctor.pyz --bogus-flag-xyz > /dev/null 2>&1
+          bogus_code=$?
+          set -e
+          test "$bogus_code" -ne 0
       - name: Compute checksums
         run: |
           cd dist
