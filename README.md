@@ -72,7 +72,7 @@ pip install --user zram-doctor   # once published to PyPI
 Or grab the standalone `.pyz` from a GitHub Release (no pip/venv needed):
 
 ```bash
-curl -LO https://github.com/zhuhroscar-tech/zram-doctor/releases/download/v0.1.0/zram-doctor.pyz
+curl -LO https://github.com/zhuhroscar-tech/zram-doctor/releases/latest/download/zram-doctor.pyz
 python3 zram-doctor.pyz --help
 ```
 
