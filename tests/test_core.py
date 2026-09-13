@@ -177,6 +177,34 @@ def test_evaluate_configured_device_with_zramctl_missing_is_unknown_not_fail():
     assert any("zramctl" in f.message.lower() for f in report.findings)
 
 
+def test_run_zramctl_permission_error_does_not_produce_false_fail_end_to_end(monkeypatch):
+    """Regression, end-to-end through the real run_zramctl -> evaluate path:
+    a device IS configured in zram-generator.conf, but the caller lacks
+    permission to query live zram state (zramctl exits nonzero). Before the
+    fix, run_zramctl silently reported missing=False for this case, which
+    made evaluate() treat "we never actually checked" as "we checked and it
+    genuinely isn't there", emitting a hard fail telling the user their
+    systemd unit may have failed to run -- when the real, fixable problem is
+    just insufficient privilege to query zramctl. This must instead surface
+    as the honest "could not be checked" info/warning path, with no false
+    fail."""
+    monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: "/usr/bin/zramctl")
+
+    def fake_runner(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="zramctl: cannot open /dev/zram0: Permission denied")
+
+    devices, zramctl_missing = run_zramctl(runner=fake_runner)
+    configured = [ConfiguredDevice(name="zram0", zram_size_expr="4096", compression_algorithm="zstd")]
+    report = evaluate(configured, devices, set(), zramctl_missing=zramctl_missing)
+
+    assert report.tool_error is True
+    assert not report.has_failures, (
+        "a zramctl permission/runtime error must never be reported as a "
+        "confirmed 'device does not exist / unit failed' fail"
+    )
+    assert any("zramctl" in f.message.lower() and "not available" in f.message.lower() for f in report.findings)
+
+
 def test_collect_and_evaluate_propagates_zramctl_missing(monkeypatch):
     monkeypatch.setattr("zram_doctor.core.get_merged_config_text", lambda runner=None: None)
     monkeypatch.setattr("zram_doctor.core.run_zramctl", lambda runner=None: ([], True))
@@ -361,7 +389,14 @@ def test_run_zramctl_subprocess_error_returns_empty(monkeypatch):
     assert missing is True
 
 
-def test_run_zramctl_nonzero_returncode_returns_empty(monkeypatch):
+def test_run_zramctl_nonzero_returncode_is_reported_as_unverifiable(monkeypatch):
+    """A nonzero exit (e.g. permission denied reading /sys/block/zramN) means
+    zramctl never successfully told us the live state -- it must be treated
+    the same as "zramctl missing" (missing=True), not conflated with the
+    legitimate "ran fine, zero devices" case (valid JSON, returncode 0),
+    which is covered separately by test_run_zramctl_parses_json's sibling
+    zero-device case below. Before this fix, a permission error and a
+    genuine empty fleet were indistinguishable to callers."""
     monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: "/usr/bin/zramctl")
 
     def fake_runner(cmd, **kwargs):
@@ -369,7 +404,7 @@ def test_run_zramctl_nonzero_returncode_returns_empty(monkeypatch):
 
     devices, missing = run_zramctl(runner=fake_runner)
     assert devices == []
-    assert missing is False
+    assert missing is True
 
 
 def test_run_zramctl_invalid_json_returns_empty(monkeypatch):

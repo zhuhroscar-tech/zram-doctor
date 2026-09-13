@@ -170,7 +170,20 @@ def run_zramctl(runner=subprocess.run) -> tuple:
         )
     except (OSError, subprocess.SubprocessError):
         return [], True
-    if proc.returncode != 0 or not proc.stdout:
+    if proc.returncode != 0:
+        # zramctl is installed but the invocation itself failed (e.g. the
+        # caller lacks permission to read /sys/block/zramN, or some other
+        # runtime error) -- this is fundamentally different from "zramctl
+        # ran fine and genuinely found zero devices" (which returns valid
+        # JSON like {"zramdevices": []} with returncode 0 and is handled
+        # below). Collapsing both into missing=False previously let a
+        # permission error masquerade as a confirmed "no live device"
+        # result, which downstream evaluate() turned into a false "fail"
+        # claiming a configured device was never created / its unit
+        # failed -- when the real cause was simply that we never
+        # successfully queried live state at all.
+        return [], True
+    if not proc.stdout:
         return [], False
     try:
         data = json.loads(proc.stdout)
