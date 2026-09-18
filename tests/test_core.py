@@ -303,6 +303,23 @@ def test_evaluate_no_mount_point_drift_when_matching():
     assert not report.has_warnings
 
 
+def test_evaluate_flags_swap_device_actually_mounted_as_filesystem():
+    """Config says zram0 has no mount-point (implying swap use), but the
+    live device is actually mounted as a filesystem instead. This is real
+    drift -- the swap capacity the admin configured doesn't exist, and an
+    unexpected filesystem mount exists instead -- but the pre-fix evaluate()
+    only checked `not live_dev.mountpoint` in this branch, so a device WITH
+    a mountpoint fell through every check and was reported as agreeing."""
+    configured = [ConfiguredDevice(name="zram0", mount_point=None)]
+    live = [LiveDevice(name="zram0", algorithm="zstd", disksize_bytes=1024**3, mountpoint="/mnt/oops")]
+    report = evaluate(configured, live, swap_names=set())
+    assert report.has_warnings
+    assert any(
+        "mounted" in f.message and "/mnt/oops" in f.message
+        for f in report.findings
+    )
+
+
 # --- get_merged_config_text: OSError/exception paths ---
 
 

@@ -365,15 +365,27 @@ def evaluate(configured: list, live: list, swap_names: set, zramctl_missing: boo
                         f"{live_dev.mountpoint or 'none'}.",
                     )
                 )
-        elif cfg.mount_point is None and cfg.name not in swap_names and not live_dev.mountpoint:
-            findings.append(
-                Finding(
-                    "warn",
-                    f"{cfg.name} is configured with no mount-point (implying swap use) "
-                    f"but is not currently active in `swapon --show`. It may have failed "
-                    f"to activate as swap, or been swapoff'd manually.",
+        elif cfg.mount_point is None and cfg.name not in swap_names:
+            if live_dev.mountpoint:
+                findings.append(
+                    Finding(
+                        "warn",
+                        f"{cfg.name} is configured with no mount-point (implying swap use) "
+                        f"but the live device is actually mounted as a filesystem at "
+                        f"{live_dev.mountpoint}, and is not active in `swapon --show`. The "
+                        f"configured swap capacity does not exist; something mounted this "
+                        f"device as a filesystem instead of letting it back swap.",
+                    )
                 )
-            )
+            else:
+                findings.append(
+                    Finding(
+                        "warn",
+                        f"{cfg.name} is configured with no mount-point (implying swap use) "
+                        f"but is not currently active in `swapon --show`. It may have failed "
+                        f"to activate as swap, or been swapoff'd manually.",
+                    )
+                )
 
     configured_names = {c.name for c in configured}
     for live_dev in live:
