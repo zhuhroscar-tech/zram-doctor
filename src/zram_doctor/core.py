@@ -118,6 +118,19 @@ def get_merged_config_text(runner=subprocess.run) -> Optional[str]:
 _SECTION_RE = re.compile(r"^\[(zram\d+)\]\s*$")
 _KV_RE = re.compile(r"^([A-Za-z0-9_-]+)\s*=\s*(.+?)\s*$")
 
+# zram-generator's compression-algorithm= takes "a whitespace-separated list
+# string, representing the algorithms to use, and parameters in parentheses"
+# (see `man zram-generator.conf` / systemd/zram-generator's own conf.md):
+# e.g. "zstd(level=19)" for tuning parameters, or "zstd lz4" where the second
+# and later entries are recompression tiers, not the primary/active
+# algorithm. `zramctl --output-all` only ever reports the single currently
+# active algorithm name (e.g. "zstd"), with no parameters and no tier list.
+# Comparing the raw configured string against that bare name therefore
+# produces a false drift warning for any correctly-configured device using
+# either documented feature -- this regex extracts just the primary
+# algorithm's bare name for comparison purposes.
+_ALGO_PRIMARY_RE = re.compile(r"^([^\s(]+)")
+
 
 def parse_zram_generator_conf(text: str) -> list:
     """Parse zram-generator.conf's INI-like format into ConfiguredDevice list.
@@ -285,6 +298,23 @@ def parse_size_literal(expr: str) -> Optional[int]:
     return int(float(number) * multiplier)
 
 
+def primary_algorithm_name(expr: Optional[str]) -> Optional[str]:
+    """Extract the primary/active algorithm name from a configured
+    compression-algorithm= value for comparison against zramctl's live
+    report, which only ever shows the single bare active algorithm name.
+
+    Strips any parenthesized parameters ("zstd(level=19)" -> "zstd") and
+    takes only the first whitespace-separated token, since subsequent
+    tokens in a multi-algorithm list are recompression tiers rather than
+    the primary/active algorithm zramctl reports. Returns None for empty
+    input.
+    """
+    if not expr:
+        return None
+    m = _ALGO_PRIMARY_RE.match(expr.strip())
+    return m.group(1) if m else None
+
+
 def evaluate(configured: list, live: list, swap_names: set, zramctl_missing: bool = False) -> Report:
     findings = []
     live_by_name = {d.name: d for d in live}
@@ -317,7 +347,8 @@ def evaluate(configured: list, live: list, swap_names: set, zramctl_missing: boo
             continue
 
         if cfg.compression_algorithm and live_dev.algorithm:
-            if cfg.compression_algorithm.strip().lower() != live_dev.algorithm.strip().lower():
+            configured_primary = primary_algorithm_name(cfg.compression_algorithm)
+            if configured_primary and configured_primary.strip().lower() != live_dev.algorithm.strip().lower():
                 findings.append(
                     Finding(
                         "warn",

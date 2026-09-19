@@ -10,6 +10,7 @@ from zram_doctor.core import (
     get_merged_config_text,
     parse_size_literal,
     parse_zram_generator_conf,
+    primary_algorithm_name,
     run_swapon,
     run_zramctl,
 )
@@ -286,6 +287,70 @@ def test_evaluate_reports_info_for_unverifiable_size_expression():
         "ram/swap-relative expression" in f.message and f.level == "info"
         for f in report.findings
     )
+
+
+# --- regression: compression-algorithm= parenthesized params / recompression tiers ---
+# Real upstream config syntax per `man zram-generator.conf` /
+# systemd/zram-generator's own conf.md: compression-algorithm= takes "a
+# whitespace-separated list string, representing the algorithms to use, and
+# parameters in parentheses" -- e.g. "zstd(level=19)" for tuning, or
+# "zstd lz4" where later entries are recompression tiers. zramctl only ever
+# reports the single bare active algorithm name with no params/tiers, so a
+# raw string comparison against the full configured value produced a false
+# drift warning for every correctly-configured device using either feature.
+
+
+def test_primary_algorithm_name_strips_parenthesized_params():
+    assert primary_algorithm_name("zstd(level=19)") == "zstd"
+
+
+def test_primary_algorithm_name_takes_first_token_of_multi_algo_list():
+    assert primary_algorithm_name("zstd lz4") == "zstd"
+
+
+def test_primary_algorithm_name_plain_name_unchanged():
+    assert primary_algorithm_name("lzo-rle") == "lzo-rle"
+
+
+def test_primary_algorithm_name_empty_is_none():
+    assert primary_algorithm_name("") is None
+    assert primary_algorithm_name(None) is None
+
+
+def test_evaluate_no_false_drift_for_parenthesized_algorithm_params():
+    """Before this fix: a device configured with tuning parameters like
+    'zstd(level=19)' was compared as a raw string against zramctl's bare
+    'zstd' report, always mismatching and producing a false restart-needed
+    warning even when the device is running exactly the configured
+    algorithm."""
+    configured = [ConfiguredDevice(name="zram0", compression_algorithm="zstd(level=19)")]
+    live = [LiveDevice(name="zram0", algorithm="zstd", disksize_bytes=4 * 1024**3)]
+    report = evaluate(configured, live, {"zram0"})
+    assert not report.has_warnings
+    assert not any("compression-algorithm" in f.message for f in report.findings)
+
+
+def test_evaluate_no_false_drift_for_multi_algorithm_recompression_list():
+    """Before this fix: a device configured with a recompression tier list
+    like 'zstd lz4' (zstd primary, lz4 as a later recompression tier) was
+    compared as a raw string against zramctl's bare 'zstd', always
+    mismatching -- even though the primary/active algorithm genuinely
+    matches."""
+    configured = [ConfiguredDevice(name="zram0", compression_algorithm="zstd lz4")]
+    live = [LiveDevice(name="zram0", algorithm="zstd", disksize_bytes=4 * 1024**3)]
+    report = evaluate(configured, live, {"zram0"})
+    assert not report.has_warnings
+    assert not any("compression-algorithm" in f.message for f in report.findings)
+
+
+def test_evaluate_still_flags_real_algorithm_drift_with_params():
+    """The fix must not blind the check entirely: a genuine mismatch on the
+    primary algorithm (ignoring params) is still real drift."""
+    configured = [ConfiguredDevice(name="zram0", compression_algorithm="lz4(level=1)")]
+    live = [LiveDevice(name="zram0", algorithm="zstd", disksize_bytes=4 * 1024**3)]
+    report = evaluate(configured, live, {"zram0"})
+    assert report.has_warnings
+    assert any("compression-algorithm" in f.message for f in report.findings)
 
 
 def test_evaluate_flags_mount_point_drift():
