@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zram-doctor"
-version = "0.2.9"
+version = "0.2.10"
 description = "Detects drift between zram-generator.conf and the actually-running zram device(s)"
 readme = "README.md"
 license = { text = "MIT" }
