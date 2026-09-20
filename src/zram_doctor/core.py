@@ -269,44 +269,104 @@ def _human_bytes(n: Optional[int]) -> str:
     return f"{value:.1f}PiB"
 
 
-# zram-generator's zram-size grammar allows plain numeric literals (with an
-# optional K/M/G/T suffix, MiB-based binary units, default unit is MiB when
-# none given) *or* arithmetic expressions referencing "ram"/"swap" totals
-# and min()/max() -- see `man zram-generator.conf`. We can only safely
-# verify the plain-literal case without re-implementing that whole
-# expression grammar and re-deriving the host's RAM/swap totals the same
-# way the generator does; for anything else we report the drift check as
-# genuinely unknown rather than silently skipping it or guessing.
-_SIZE_LITERAL_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([KMGT]i?B?|[kmgt])?$")
-_SIZE_UNIT_MULTIPLIERS = {
-    "": 1024 * 1024,  # zram-generator's default unit is MiB
-    "K": 1024,
-    "KIB": 1024,
-    "M": 1024 * 1024,
-    "MIB": 1024 * 1024,
-    "G": 1024 * 1024 * 1024,
-    "GIB": 1024 * 1024 * 1024,
-    "T": 1024 * 1024 * 1024 * 1024,
-    "TIB": 1024 * 1024 * 1024 * 1024,
+# zram-generator's zram-size value is a `fasteval` arithmetic expression
+# (arithmetic operators, e/pi, SI suffixes, min()/max()/etc. -- see `man
+# zram-generator.conf` and github.com/systemd/zram-generator's own
+# src/config.rs). We can only safely verify the plain-numeric-literal case
+# without re-implementing that whole expression grammar and re-deriving the
+# host's RAM/swap totals the same way the generator does; for anything else
+# we report the drift check as genuinely unknown rather than guessing.
+#
+# CRITICAL, independently-verified-from-upstream-source unit semantics for
+# the plain-literal case (do not "fix" this back to binary KiB/MiB/GiB --
+# that was this exact function's own prior, wrong, assumption):
+#
+# 1. `fasteval`'s number parser (src/parser.rs `read_const`) recognizes only
+#    a *single trailing ASCII letter* as an SI (decimal, power-of-10)
+#    exponent suffix -- k/K=1e3, M=1e6, G=1e9, T=1e12 (also m/u/n/p for
+#    negative exponents, irrelevant here) -- and folds it into the parsed
+#    f64 value before zram-generator ever sees it. It does NOT recognize
+#    two/three-letter "Ki"/"Mi"/"GiB"/"MiB" style binary-unit suffixes at
+#    all: "8GiB" is not a valid fasteval token and is a config parse error
+#    upstream, not a valid 8-GiB literal.
+# 2. zram-generator's own `process_size()` (src/config.rs) then ALWAYS
+#    multiplies that already-suffix-expanded f64 by 1024*1024, because the
+#    whole zram-size grammar (including its "ram"/"swap" variables and its
+#    documented default of `min(ram / 2, 4096)`) is defined in MB units --
+#    the SI suffix, if present, scales the number fasteval hands back, it
+#    does NOT change the fact that the *result* of the expression is always
+#    re-interpreted as megabytes afterward.
+#
+# Net effect: "zram-size = 8G" does NOT mean 8 GiB. It means the SI-decimal
+# value 8e9, THEN re-interpreted as 8e9 *megabytes* = 8e9 * 1024 * 1024
+# bytes (~7.45 EiB) -- a value so far from a sysadmin's intent that
+# zram-generator itself emits its own "units may be wrong" warning for it
+# (config.rs's `ratio > 32` check). zram is a sparse/virtual block device,
+# so this monstrous `disksize` is NOT rejected at creation time (no memory
+# is actually reserved up front) -- the device is created successfully and
+# `zramctl` reports back that real, huge byte count. Under this function's
+# PRIOR (binary-unit) assumption, `parse_size_literal("8G")` returned
+# `8 * 1024**3` (~8.6 GB) -- six orders of magnitude off from the real live
+# device size -- which made `evaluate()` emit a false "zram-size drift,
+# restart the unit" warning for a device that in fact exactly matches its
+# (poorly chosen, but syntactically valid) configured expression. This is
+# the same "reports more certainty than it actually has" bug class already
+# fixed in this repo's run_zramctl() and across nft-splitbrain/
+# reboot-safety-check/usbsmart-doctor -- verified against upstream source
+# (fasteval parser.rs + zram-generator config.rs), not merely suspected.
+_SIZE_LITERAL_RE = re.compile(
+    r"^([+-]?\d+(?:\.\d+)?)(?:([eE][+-]?\d+)|([kKMGTmun]|\u00b5))?$"
+)
+_FASTEVAL_SI_EXPONENT = {
+    "k": 3,
+    "K": 3,
+    "M": 6,
+    "G": 9,
+    "T": 12,
+    "m": -3,
+    "u": -6,
+    "\u00b5": -6,
+    "n": -9,
+    "p": -12,
 }
 
 
 def parse_size_literal(expr: str) -> Optional[int]:
-    """Parse a plain numeric zram-size literal (e.g. "4096", "8G", "512MiB")
-    into bytes. Returns None for anything that isn't a plain literal --
-    including ram/swap-relative expressions like "min(ram / 2, 4096)",
-    which this intentionally does NOT attempt to evaluate (see module note
-    above): callers must treat None as "cannot verify", not "zero"."""
+    """Parse a plain numeric zram-size literal (e.g. "4096", "8G", "1e3")
+    into bytes, using zram-generator's REAL two-stage unit semantics (see
+    the module note above): an optional single-letter SI/decimal suffix
+    (K=1e3, M=1e6, G=1e9, T=1e12 -- as `fasteval` itself defines them, NOT
+    binary KiB/MiB/GiB) scales the literal, and the result is then always
+    treated as megabytes and multiplied by 1024*1024 to get bytes.
+
+    Returns None for anything that isn't a plain literal in this grammar --
+    including ram/swap-relative expressions like "min(ram / 2, 4096)" (which
+    this intentionally does NOT attempt to evaluate, see module note above)
+    and binary-unit-suffixed strings like "8GiB"/"512KiB", which are NOT
+    valid zram-generator syntax at all (a real config parse error upstream,
+    not a valid literal) -- callers must treat None as "cannot verify", not
+    "zero"."""
     if not expr:
         return None
     m = _SIZE_LITERAL_RE.match(expr.strip())
     if not m:
         return None
-    number, unit = m.group(1), (m.group(2) or "").upper()
-    multiplier = _SIZE_UNIT_MULTIPLIERS.get(unit)
-    if multiplier is None:
+    mantissa, sci_exponent, si_suffix = m.group(1), m.group(2), m.group(3)
+    try:
+        if sci_exponent:
+            value_mb = float(mantissa + sci_exponent)
+        elif si_suffix:
+            exponent = _FASTEVAL_SI_EXPONENT.get(si_suffix)
+            if exponent is None:
+                return None
+            value_mb = float(mantissa) * (10.0**exponent)
+        else:
+            value_mb = float(mantissa)
+    except ValueError:
         return None
-    return int(float(number) * multiplier)
+    if value_mb < 0:
+        return None
+    return int(value_mb * 1024 * 1024)
 
 
 def primary_algorithm_name(expr: Optional[str]) -> Optional[str]:

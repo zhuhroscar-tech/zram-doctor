@@ -280,17 +280,59 @@ def test_evaluate_flags_configured_swap_device_not_in_swapon():
     assert any("swapon" in f.message for f in report.findings)
 
 
-def test_parse_size_literal_plain_mib_default():
+# --- regression: zram-size unit semantics must match zram-generator's REAL
+# two-stage fasteval-then-MB-multiply grammar, not binary KiB/MiB/GiB ---
+# Independently verified against upstream source this run:
+#   - fasteval's number parser (src/parser.rs `read_const`) recognizes only
+#     a single trailing ASCII letter as an SI/decimal exponent suffix
+#     (k/K=1e3, M=1e6, G=1e9, T=1e12), NOT two/three-letter binary units
+#     ("GiB"/"MiB" are not valid fasteval tokens at all).
+#   - zram-generator's own process_size() (src/config.rs) then ALWAYS
+#     multiplies whatever fasteval evaluated by 1024*1024, because the
+#     whole zram-size grammar (including its documented default of
+#     `min(ram / 2, 4096)`) is defined in megabytes.
+# Before this fix, parse_size_literal("8G") returned 8*1024**3 (~8.6GB,
+# treating G as a binary GiB unit) when the real zram-generator-computed
+# value for that same config line is 8e9 MB in bytes (~8.4e21, i.e.
+# zram-generator's own "units may be wrong" warning territory) -- six
+# orders of magnitude apart. That mismatch made the size-drift check
+# compare the live device's real (enormous, but config-faithful) byte
+# count against a wrong, six-orders-smaller expectation, producing a false
+# "restart the unit to fix drift" warning for a device that in fact
+# exactly matches its own (poorly chosen) configuration.
+def test_parse_size_literal_plain_no_suffix_is_megabytes():
+    # No suffix: the literal is a plain MB count -- this case was already
+    # correct before the fix (no suffix path is unaffected by the bug).
     assert parse_size_literal("4096") == 4096 * 1024 * 1024
 
 
-def test_parse_size_literal_gib_suffix():
-    assert parse_size_literal("8G") == 8 * 1024**3
-    assert parse_size_literal("8GiB") == 8 * 1024**3
+def test_parse_size_literal_decimal_fraction_no_suffix():
+    assert parse_size_literal("0.5") == int(0.5 * 1024 * 1024)
 
 
-def test_parse_size_literal_kib_suffix():
-    assert parse_size_literal("512K") == 512 * 1024
+def test_parse_size_literal_si_suffix_is_decimal_not_binary():
+    # G means SI-decimal 1e9 (per fasteval), applied to the MB value,
+    # THEN the whole result is re-interpreted as megabytes and multiplied
+    # by 1024*1024 -- NOT "8 GiB of bytes" as this function previously,
+    # incorrectly, assumed.
+    assert parse_size_literal("8G") == int(8 * 1_000_000_000 * 1024 * 1024)
+    assert parse_size_literal("512K") == int(512 * 1_000 * 1024 * 1024)
+    assert parse_size_literal("2M") == int(2 * 1_000_000 * 1024 * 1024)
+
+
+def test_parse_size_literal_scientific_notation():
+    # fasteval's parser also accepts bare scientific notation (e.g. "1e3"),
+    # distinct from its single-letter SI suffixes.
+    assert parse_size_literal("1e3") == int(1000.0 * 1024 * 1024)
+
+
+def test_parse_size_literal_rejects_binary_unit_suffix():
+    # "GiB"/"MiB"/"KiB" are NOT valid zram-generator/fasteval syntax --
+    # a real config using them would be a parse error upstream, not a
+    # valid binary-unit literal. Must be treated as "cannot verify", not
+    # silently misparsed as if the trailing "iB" were ignorable noise.
+    assert parse_size_literal("8GiB") is None
+    assert parse_size_literal("512KiB") is None
 
 
 def test_parse_size_literal_returns_none_for_expression():
@@ -304,8 +346,30 @@ def test_parse_size_literal_returns_none_for_empty():
     assert parse_size_literal(None) is None
 
 
+def test_parse_size_literal_rejects_negative_value():
+    # A syntactically-matching negative literal is not a valid size.
+    assert parse_size_literal("-5") is None
+
+
+def test_evaluate_no_false_drift_when_live_device_matches_real_si_semantics():
+    """Before this fix: a device configured with 'zram-size = 8G' (which
+    zram-generator actually creates at 8e9 MB, per its real fasteval-then-
+    MB-multiply grammar -- independently verified against upstream source)
+    was compared against this tool's old, wrong, binary-GiB-based
+    expectation (8*1024**3 bytes), producing a false drift warning even
+    though the live device exactly matches its own configuration."""
+    real_bytes = int(8 * 1_000_000_000 * 1024 * 1024)
+    configured = [ConfiguredDevice(name="zram0", zram_size_expr="8G")]
+    live = [LiveDevice(name="zram0", algorithm="zstd", disksize_bytes=real_bytes)]
+    report = evaluate(configured, live, {"zram0"})
+    assert not report.has_warnings
+    assert not report.has_failures
+
+
 def test_evaluate_flags_size_drift_for_plain_literal():
     configured = [ConfiguredDevice(name="zram0", zram_size_expr="8G")]
+    # A live size that does NOT match the real (SI-then-MB) interpretation
+    # of "8G" is genuine drift.
     live = [LiveDevice(name="zram0", algorithm="zstd", disksize_bytes=4 * 1024**3)]
     report = evaluate(configured, live, {"zram0"})
     assert report.has_warnings
