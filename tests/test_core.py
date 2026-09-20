@@ -102,6 +102,49 @@ def test_run_zramctl_missing_binary_returns_empty(monkeypatch):
     assert missing is True
 
 
+def test_run_zramctl_handles_valid_json_non_dict_shape(monkeypatch):
+    """Regression: zramctl --json is expected to emit a top-level object
+    ({"zramdevices": [...]}), but run_zramctl previously called
+    data.get(...) unconditionally after json.loads() succeeded --
+    any syntactically-valid JSON of the wrong top-level type (e.g. a
+    bare list) crashed with AttributeError: 'list' object has no
+    attribute 'get' instead of degrading like the JSONDecodeError case
+    just above it does. This must return the same "genuinely don't
+    know" signal ([], False) as any other unparseable-output case, not
+    propagate an unhandled crash out of the polling loop.
+    """
+    monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: "/usr/bin/zramctl")
+
+    def fake_runner(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+
+    devices, missing = run_zramctl(runner=fake_runner)
+    assert devices == []
+    assert missing is False
+
+
+def test_run_zramctl_skips_non_dict_rows_in_valid_shape(monkeypatch):
+    """A well-shaped top-level object whose row list contains a
+    non-dict entry (e.g. a stray null/string) must skip that entry
+    rather than crashing on row.get(...), while still returning the
+    well-formed sibling rows.
+    """
+    monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: "/usr/bin/zramctl")
+
+    def fake_runner(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=json.dumps({"zramdevices": [None, {"name": "/dev/zram0", "disksize": "4294967296"}]}),
+            stderr="",
+        )
+
+    devices, missing = run_zramctl(runner=fake_runner)
+    assert missing is False
+    assert len(devices) == 1
+    assert devices[0].name == "zram0"
+
+
 def test_run_swapon_parses_names(monkeypatch):
     monkeypatch.setattr("zram_doctor.core.shutil.which", lambda name: "/usr/sbin/swapon")
 

@@ -202,9 +202,20 @@ def run_zramctl(runner=subprocess.run) -> tuple:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError:
         return [], False
+    # zramctl --json is documented/expected to emit a top-level object
+    # ({"zramdevices": [...]}); valid-but-unexpected-shape JSON (e.g. a
+    # bare list, string, or number) must degrade the same way malformed
+    # JSON already does above, not crash with AttributeError on
+    # data.get(...). Treat this the same as "genuinely don't know".
+    if not isinstance(data, dict):
+        return [], False
     rows = data.get("zramdevices") or data.get("blockdevices") or []
+    if not isinstance(rows, list):
+        return [], False
     devices = []
     for row in rows:
+        if not isinstance(row, dict):
+            continue
         name = row.get("name", "")
         name = name.rsplit("/", 1)[-1] if name else name
         disksize = row.get("disksize")
