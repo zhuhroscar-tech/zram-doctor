@@ -27,7 +27,7 @@ zram-doctor
 zram-doctor --json
 ```
 
-也可从 [Releases](https://github.com/zhuhroscar-tech/zram-doctor/releases) 下载独立 `.pyz`，运行前请核对对应版本的校验和。
+也可从 [Releases](https://github.com/zhuhroscar-tech/zram-doctor/releases) 下载独立 `.pyz`。发布历史见 [CHANGELOG.md](CHANGELOG.md)，运行前请核对对应版本的校验和。
 
 退出码：`0` 表示没有 warning/failure 项，`1` 表示存在警告，`2` 表示配置中的设备缺失。**还应检查 JSON 中的 `tool_error`**：部分设备查询不完整的情况仍可能返回 `0`，不能只看退出码判断系统正常。
 

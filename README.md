@@ -27,7 +27,7 @@ zram-doctor
 zram-doctor --json
 ```
 
-Standalone `.pyz` artifacts are available from [Releases](https://github.com/zhuhroscar-tech/zram-doctor/releases). Check the matching release's checksums before running downloaded artifacts.
+Standalone `.pyz` artifacts are available from [Releases](https://github.com/zhuhroscar-tech/zram-doctor/releases). See [CHANGELOG.md](CHANGELOG.md) for release history, and check the matching release's checksums before running downloaded artifacts.
 
 Exit codes: `0` means no warning/failure finding, `1` means warnings, and `2` means a configured device is missing. **Also inspect `tool_error` in JSON**: an incomplete device query can return `0` in some cases, so exit status alone is not a complete health check.
 
