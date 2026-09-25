@@ -4,5 +4,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+dist_*/
+.wheel-smoke-*/
 .pytest_cache/
 .coverage

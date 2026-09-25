@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zram-doctor"
-version = "0.2.12"
+version = "0.2.13"
 description = "Detects drift between zram-generator.conf and the actually-running zram device(s)"
 readme = "README.md"
 license = "MIT"
@@ -21,6 +21,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/zhuhroscar-tech/zram-doctor"
+Changelog = "https://github.com/zhuhroscar-tech/zram-doctor/blob/main/CHANGELOG.md"
 
 [project.scripts]
 zram-doctor = "zram_doctor.cli:main"

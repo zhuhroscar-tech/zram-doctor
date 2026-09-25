@@ -47,13 +47,20 @@ def test_changelog_documents_current_project_version():
     text = CHANGELOG.read_text(encoding="utf-8")
 
     assert f"## v{version}" in text
-    assert "## v0.2.11" in text
+    assert "## v0.2.12" in text
     assert "SPDX" in text
+
+
+def test_project_metadata_links_changelog():
+    pyproject = PYPROJECT.read_text(encoding="utf-8")
+
+    assert 'Changelog = "https://github.com/zhuhroscar-tech/zram-doctor/blob/main/CHANGELOG.md"' in pyproject
 
 
 def test_ci_builds_downloadable_release_artifacts():
     ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
+    assert 'tags: ["v*"]' in ci
     assert "python -m build" in ci
     assert "python -m zipapp" in ci
     assert "dist/zram-doctor.pyz" in ci

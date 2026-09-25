@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.13 — 2026-09-25
+
+- Made release-tag CI coverage explicit for `v*` tags so published releases rerun the same package and `.pyz` smoke checks as `main`.
+- Added changelog project metadata for package installers and tightened repository-contract coverage for release-tag CI wiring and changelog links.
+
 ## v0.2.12 — 2026-09-24
 
 - Added release-history documentation so users can see the maintenance and bug-fix timeline without opening GitHub Releases.
